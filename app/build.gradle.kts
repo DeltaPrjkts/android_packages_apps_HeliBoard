@@ -16,7 +16,7 @@ android {
         versionName = "3.5"
         ndk {
             abiFilters.clear()
-            abiFilters.addAll(listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64"))
+            abiFilters.addAll(listOf("arm64-v8a"))
         }
         proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
     }
@@ -43,7 +43,6 @@ android {
                 ignoreAssetsPattern = "main_ro.dict"
             }
             isJniDebuggable = false
-            applicationIdSuffix = ".debug"
         }
         create("runTests") { // build variant for running tests on CI that skips tests known to fail
             isMinifyEnabled = false
@@ -54,7 +53,6 @@ android {
             isMinifyEnabled = false
             isJniDebuggable = false
             signingConfig = signingConfigs.getByName("debug")
-            applicationIdSuffix = ".debug"
         }
         base.archivesBaseName = "HeliBoard_" + defaultConfig.versionName
     }
