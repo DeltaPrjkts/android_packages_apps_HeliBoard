@@ -166,6 +166,7 @@ public final class InputLogic {
         cancelDoubleSpacePeriodCountdown();
         mInputLogicHandler.reset();
         mConnection.requestCursorUpdates(true, true);
+        setInlineEmojiSearchAction(false);
     }
 
     /**
@@ -800,6 +801,10 @@ public final class InputLogic {
             case KeyCode.IME_HIDE_UI:
                 mLatinIME.requestHideSelf(0);
                 break;
+            case KeyCode.INLINE_EMOJI_SEARCH_DONE:
+                setInlineEmojiSearchAction(false);
+                inputTransaction.setRequiresUpdateSuggestions();
+                break;
             case KeyCode.VOICE_INPUT:
                 // switching to shortcut IME, shift state, keyboard,... is handled by LatinIME,
                 // {@link KeyboardSwitcher#onEvent(Event)}, or {@link #onPressKey(int,int,boolean)} and {@link #onReleaseKey(int,boolean)}.
@@ -813,31 +818,28 @@ public final class InputLogic {
                     inputTransaction.setRequiresUpdateSuggestions();
                 }
                 break;
-            case KeyCode.INLINE_EMOJI_SEARCH_DONE:
-                setInlineEmojiSearchAction(false);
-                if (mSuggestedWords.mWillAutoCorrect) {
-                    deleteTextReplacedByEmoji();
-                    commitCurrentAutoCorrection(inputTransaction.getSettingsValues(), LastComposedWord.NOT_A_SEPARATOR, handler);
-                    inputTransaction.setDidAutoCorrect();
-                    mSuggestionStripViewAccessor.setNeutralSuggestionStrip();
-                } else {
-                    inputTransaction.setRequiresUpdateSuggestions();
-                }
-
-                break;
             default:
                 if (KeyCode.INSTANCE.isModifier(keyCode))
                     return; // continuation of previous switch case above, but modifiers are held in a separate place
                 final int keyEventCode = keyCode > 0
                     ? keyCode
-                    : event.getCodePoint() >= 0 ? KeyCode.codePointToKeyEventCode(event.getCodePoint())
-                    : KeyCode.keyCodeToKeyEventCode(keyCode);
+                    : event.getCodePoint() >= 0
+                        ? KeyCode.codePointToKeyEventCode(event.getCodePoint())
+                        : KeyCode.keyCodeToKeyEventCode(keyCode);
                 if (keyEventCode != KeyEvent.KEYCODE_UNKNOWN) {
                     sendDownUpKeyEventWithMetaState(keyEventCode, event.getMetaState());
                     return;
                 }
+                if (event.getMetaState() != 0 && event.getCodePoint() >= 32) {
+                    // Try handling it as normal key event, this essentially just ignore the meta state.
+                    // The conversion is good, as this way we are able to use e.g. ctrl + V. But if we don't have a codePointToKeyEventCode
+                    // for that key, we will just input the normal key now, e.g. ctrl + @ will (probably) do nothing, but ctrl + _ will input _
+                    // Maybe we should just return instead?
+                    handleNonFunctionalEvent(event, inputTransaction, handler);
+                    return;
+                }
                 // unknown event
-                Log.e(TAG, "unknown event, key code: "+keyCode+", meta: "+event.getMetaState());
+                Log.e(TAG, "unknown event, key code: "+keyCode+", codepoint "+event.getCodePoint()+", meta: "+event.getMetaState());
                 if (DebugFlags.DEBUG_ENABLED)
                     throw new RuntimeException("Unknown event");
         }
@@ -1253,6 +1255,7 @@ public final class InputLogic {
             } else {
                 mConnection.commitText("", 1);
             }
+            updateInlineEmojiSearch();
             inputTransaction.setRequiresUpdateSuggestions();
         } else {
             if (mLastComposedWord.canRevertCommit() && inputTransaction.getSettingsValues().mBackspaceRevertsAutocorrect) {
@@ -1765,7 +1768,6 @@ public final class InputLogic {
 
         updateInlineEmojiSearch();
         if (isInlineEmojiSearchAction()) {
-            mWordComposer.setComposingWord(EMPTY_CODE_POINTS, null);
             mInputLogicHandler.getSuggestedWords(() -> getSuggestedWords(SuggestedWords.INPUT_STYLE_TYPING,
                 SuggestedWords.NOT_A_SEQUENCE_NUMBER, this::doShowSuggestionsAndClearAutoCorrectionIndicator));
             return;
@@ -1899,8 +1901,7 @@ public final class InputLogic {
         final String stringToCommit = originallyTypedWord +
                 (usePhantomSpace ? "" : separatorString);
         final SpannableString textToCommit = new SpannableString(stringToCommit);
-        if (committedWord instanceof SpannableString) {
-            final SpannableString committedWordWithSuggestionSpans = (SpannableString)committedWord;
+        if (committedWord instanceof SpannableString committedWordWithSuggestionSpans) {
             final Object[] spans = committedWordWithSuggestionSpans.getSpans(0,
                     committedWord.length(), Object.class);
             final int lastCharIndex = textToCommit.length() - 1;
@@ -2342,8 +2343,7 @@ public final class InputLogic {
         }
         final SuggestedWordInfo autoCorrectionOrNull = mWordComposer.getAutoCorrectionOrNull();
         final String typedWord = mWordComposer.getTypedWord();
-        final String stringToCommit = (autoCorrectionOrNull != null)
-                ? autoCorrectionOrNull.mWord : typedWord;
+        final String stringToCommit = (autoCorrectionOrNull != null) ? autoCorrectionOrNull.mWord : typedWord;
         if (stringToCommit != null) {
             final boolean isBatchMode = mWordComposer.isBatchMode();
             commitChosenWord(settingsValues, stringToCommit, LastComposedWord.COMMIT_TYPE_DECIDED_WORD, separator);
@@ -2357,7 +2357,7 @@ public final class InputLogic {
                 mConnection.commitCorrection(new CorrectionInfo(
                         mConnection.getExpectedSelectionEnd() - stringToCommit.length(),
                         typedWord, stringToCommit));
-                String prevWordsContext = (autoCorrectionOrNull != null)
+                final String prevWordsContext = (autoCorrectionOrNull != null)
                         ? autoCorrectionOrNull.mPrevWordsContext
                         : "";
                 StatsUtils.onAutoCorrection(typedWord, stringToCommit, isBatchMode,
@@ -2612,8 +2612,7 @@ public final class InputLogic {
         if (on != isInlineEmojiSearchAction()) {
             KeyboardSwitcher.getInstance().loadKeyboard(mLatinIME.getCurrentInputEditorInfo(), Settings.getValues(),
                             mLatinIME.getCurrentAutoCapsState(), mLatinIME.getCurrentRecapitalizeState(),
-                            on? new KeyboardLayoutSet.InternalAction(
-                                KeyCode.INLINE_EMOJI_SEARCH_DONE, Settings.getValues().mAutoCorrectEnabled? "\uD83D\uDC4D" : "⏹️") : null);
+                            on? new KeyboardLayoutSet.InternalAction(KeyCode.INLINE_EMOJI_SEARCH_DONE,"!icon/close_history") : null);
         }
     }
 
@@ -2647,13 +2646,18 @@ public final class InputLogic {
             }
         }
         callback.onGetSuggestedWords(new SuggestedWords(suggestedWordInfos, suggestions.mRawSuggestions, typedWordInfo,
-                                     false /* typedWordValid */, Settings.getValues().mAutoCorrectEnabled,
+                                     false /* typedWordValid */, false /* autoCorrectEnabled */,
                                      false /* isObsoleteSuggestions */, SuggestedWords.INPUT_STYLE_TYPING, sequenceNumber));
     }
 
     private void deleteTextReplacedByEmoji() {
         mConnection.finishComposingText();
-        mConnection.deleteTextBeforeCursor(getInlineEmojiSearchString().length() + 1);
+        var inlineEmojiSearchString = getInlineEmojiSearchString();
+        if (inlineEmojiSearchString != null) {
+            mConnection.deleteTextBeforeCursor(inlineEmojiSearchString.length() + 1);
+        } else {
+            Log.e("inlineEmojiSearch", "Inconsistent state - inlineEmojiSearchString is null");
+        }
     }
 
     private String getInlineEmojiSearchString() {
@@ -2664,7 +2668,15 @@ public final class InputLogic {
         return getInlineEmojiSearchString(mConnection.getTextBeforeCursor(50, 0));
     }
 
-    // public for testing
+    /**
+     * Gets the inline emoji search string. Rules:
+     * - string starts with last colon before the cursor
+     * - the character before the colon has to be non-word, non-digit
+     * - the character after the colon has to be non-space
+     * - the string cannot contain newlines
+     * <p>
+     * Public for testing.
+     */
     public static String getInlineEmojiSearchString(CharSequence textBeforeCursor) {
         if (textBeforeCursor == null) {
             return null;
@@ -2681,6 +2693,10 @@ public final class InputLogic {
         }
 
         if (Character.isWhitespace(text.codePointAt(markerIndex + 1))) {
+            return null;
+        }
+
+        if (text.indexOf('\n', markerIndex + 2) >= 0) {
             return null;
         }
 
